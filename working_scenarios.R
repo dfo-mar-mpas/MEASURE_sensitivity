@@ -429,7 +429,7 @@ mpas <- MPAs %>%
 
 
 #create spatial grid once
-years <- c(2006, 2008, 2010, 2012)
+years <- seq(1997, 2026, 5)
 
 coral_df <- st_transform(coral_df, 32620)
 mpas <- st_transform(mpas, 32620)
@@ -676,3 +676,7 @@ for (yr in years) {
 # Combine all scores into one dataframe
 coral_scores <- bind_rows(coral_scores) %>%
   arrange(Year, Indicator)
+
+mean_coral_scores <- coral_scores %>%
+  group_by(Year, Indicator) %>%
+  summarize(Score = mean(Score, na.rm = TRUE))
