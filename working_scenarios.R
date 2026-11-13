@@ -5,10 +5,9 @@ require(rvest)
 require(xml2)
 require(purrr)
 require(stringr)
-require(dplyr)
 require(tidyr)
 require(vegan)
-
+require(dplyr)
 
 
 gullyzones <- get_spatial_layer(
@@ -16,50 +15,15 @@ gullyzones <- get_spatial_layer(
   where = "NAME_E LIKE '%Gully%'"
 )
 
-# pull data from https://data.mendeley.com/datasets/z3v6jdnwh6/1
-download.file(
-  "https://data.mendeley.com/public-files/datasets/z3v6jdnwh6/files/4ce7d9ba-046f-4259-82ca-7fd32bff1d82/file_downloaded",
-  "data/Gully_MPA_Photo_Archive_Metadata.xlsx", mode = "wb")
-photos <- readxl::read_xlsx("data/Gully_MPA_Photo_Archive_Metadata.xlsx") %>%
-  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE)
-
-#bubblegum coral from https://data.mendeley.com/datasets/bzpzzw9tdc/1
-download.file("https://data.mendeley.com/public-files/datasets/bzpzzw9tdc/files/7062b4f9-caea-4b8b-8bcd-c67521cdb835/file_downloaded",
-              "data/Response_data_OccurrenceParagorgia_PA.csv")
-bubble <- read.csv("data/Response_data_OccurrenceParagorgia_PA.csv") %>%
-  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
-
-# NOAA coral data from https://noaa.maps.arcgis.com/home/item.html?id=f465861aecac410980a7c601cfec7850#overview
-noaa <- read.csv("data/DSCRTP_NatDB_20260416-1.csv") %>%
-  filter(Country=="Canada", Class %in% c("Octocorallia", "Hexacorallia")) %>%
-  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326, remove = FALSE) %>%
-  st_filter(st_buffer(gullyzones,dist=10^6)) # filter to within 1000 km of Gully MPA
-
-
-coral_species <- c(
-  "SEA CORALS (NS)",
-  "SOFT CORAL UNIDENTIFIED",
-  "ANTHOZOA",
-  "LOPHELIA PERTUSA",
-  "PARAMURICEA SPP",
-  "PARAGORGIA ARBOREA",
-  "KERATOISIS ORNATA",
-  "CHRYSOGORGIA AGASSIZII",
-  "PRIMNOA RESEDAEFORMIS",
-  "FLABELLUM ALABASTRUM",
-  "FLABELLUM SP",
-  "CARYOPHYLLIIDAE F.",
-  "ANTIPATHARIAN O.",
-  "ANTHOMASTUS GRANDIFLORUS"
-)
-
-# rv from https://open.canada.ca/data/en/dataset/1366e1f1-e2c8-4905-89ae-e10f1be0a164
-rv <- read.csv("data/SUMMER_2023_GSCAT.csv") %>%
-  left_join(read.csv("data/SUMMER_2023_GSINF.csv"),by = join_by(MISSION, SETNO)) %>%
-  left_join(read.csv("data/SUMMER_2023_GSSPECIES.csv"), by = c("SPEC"="CODE")) %>%
-  filter(SCI_NAME %in% coral_species) %>%
-  st_as_sf(coords = c("SLONG", "SLAT"), crs = 4326, remove = FALSE)
-
+coral_presence <- read_excel("data/Data records for Sensitivity Analyses.xlsx") %>%
+  rename(
+    Latitude = Lat,
+    Longitude = Long,
+    sci_name = Taxa
+  ) %>%
+  mutate(pa = 1) %>%
+  dplyr::select(Latitude, Longitude, sci_name, pa, Year) %>%
+  st_as_sf(crs = 4326, coords = c("Longitude", "Latitude"), remove = FALSE)
 
 url <-  "https://www.inter.dfo-mpo.gc.ca/en/mar-var-2023-110"          # "https://www.dfo-mpo.gc.ca/oceans/mpa-zpm/gully/index-eng.html"
 
@@ -103,28 +67,6 @@ table_to_polygon <- function(d) {
   st_polygon(list(xy))
 }
 
-# --- scrape ------------------------------------------------------------------
-
-# # If the site ever rejects the default user agent, swap for:
-# # page <- session(url, httr::user_agent("Mozilla/5.0")) %>% read_html()
-# page <- read_html(url)
-#
-# tbl_nodes <- html_elements(page, "table")
-# tbls <- html_table(tbl_nodes)
-#
-# # keep only tables that look like coordinate tables (Point / Latitude / Longitude)
-# keep <- map_lgl(tbls, \(d) {
-#   all(c("latitude", "longitude") %in% tolower(names(d)))
-# })
-# if (!any(keep)) {
-#   stop("No Latitude/Longitude tables found - page layout may have changed.")
-# }
-#
-# tbl_nodes <- tbl_nodes[keep]
-# tbls <- tbls[keep]
-#
-# labels <- map2_chr(as.list(tbl_nodes), seq_along(tbl_nodes), label_for_table)
-# polys <- map(tbls, table_to_polygon)
 
 page <- read_html(url)
 
@@ -220,70 +162,17 @@ gully_vo <- st_sf(
   st_transform(st_crs(gullyzones))
 
 
-
-
-
-
-total_bubble <- read.csv("data/Response_data_OccurrenceParagorgia_PA.csv") %>%
-  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
-
-bubble <-  total_bubble %>%
-  select(pa) %>%
-  filter(pa==1)
-
-bg_coral_occurrence <- nrow(bubble) / nrow(total_bubble)
-
-
-knowncoralbubbles <- bind_rows(
-  rv %>%
-    mutate(sci_name=str_to_sentence(tolower(SCI_NAME)),
-           date = SDATE,
-           source = "RV") %>%
-    dplyr::select(sci_name, date, source),
-
-  bubble %>%
-    dplyr::select(pa) %>%
-    filter(pa==1)  %>%
-    mutate(sci_name= "Paragorgia arborea",
-           date = NA,
-           source = "bubble") %>%
-    dplyr::select(-pa),
-  noaa %>%
-    mutate(sci_name=ScientificName,
-           date = ObservationDate ,
-           source = "NOAA") %>%
-    dplyr::select(sci_name, date, source)
-
-) %>%
-  st_buffer(dist = 100)
-
-
-photo_buffer_count <- st_join(photos, knowncoralbubbles, left = FALSE) %>%   #Finding what photos fall in a known corals buffer
-  st_drop_geometry() %>%
-  count(ID, sci_name, name = "coral_buffer_count")
-
-
-coral_photos_df <- cross_join(
-  data.frame(sci_name = unique(knowncoralbubbles$sci_name)),     #Creates a df where every photo is associated with every distinct species
-  photos
-) %>%
-  left_join(photo_buffer_count, by = c("ID", "sci_name")) %>%
-  mutate(coral_buffer_multiplier = ifelse(is.na(coral_buffer_count), 1, 2)) %>%
-  dplyr::select(ID, sci_name, coral_buffer_multiplier)
-
-coral_df <- photos %>%
+coral_df <- coral_presence %>%
   st_join(gullyzones) %>%
   st_join(gully_vo) %>%
   right_join(coral_photos_df, by = "ID") %>%
   mutate(zone_multiplier = case_when(!is.na(Variation_Order) ~ 10,
                                      ZONE_E == "Zone 1" ~ 8,
                                      ZONE_E == "Zone 2" ~ 3,
-                                     .default = 1),
-
-         pa = runif(n()) < bg_coral_occurrence/100*zone_multiplier*coral_buffer_multiplier) %>%
-  dplyr::select(names(photos), zone_multiplier, pa, Variation_Order, ZONE_E, coral_buffer_multiplier, sci_name) %>%
-  mutate(density = ifelse(!is.na(Gear), runif(n(), 0, 5)*pa*zone_multiplier, NA),    #this is in corals per meter sq     #originally was set to on;y run if the gear was ropos but messes with thing is there is no ROPOS data
-         size = ifelse(!is.na(Gear), runif(n(), 0, 20)*pa*zone_multiplier, NA),     #this is in cm
+                                     .default = 1) %>%
+  dplyr::select(names(coral_presence), zone_multiplier, Variation_Order, ZONE_E, coral_buffer_multiplier, sci_name) %>%
+  mutate(density = runif(n(), 0, 5)*pa*zone_multiplier,    #this is in corals per meter sq     #originally was set to on;y run if the gear was ropos but messes with thing is there is no ROPOS data
+         size = runif(n(), 0, 20)*pa*zone_multiplier,     #this is in cm
          per_colony_living = case_when(Year < 2004 & (ZONE_E == "Zone 1" | Variation_Order == "Portion of 4W") ~ rbeta(n(), 17, 3),    # This is the % living of a single colony----Self protected in canyons   (85%)
                                        Year >= 2004 & (ZONE_E == "Zone 1") ~ rbeta(n(), 19, 1),                                        # Once protections kick in for zone 1      (95%)
                                        Year >= 2004 & ZONE_E == "Zone 2" & is.na(Variation_Order) ~ rbeta(n(), 18, 2),                 # Ignoring VOs, protection kicks in for Zone 2 but its less than zone 1   (90%)
