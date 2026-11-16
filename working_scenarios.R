@@ -22,7 +22,7 @@ coral_presence <- read_excel("data/Data records for Sensitivity Analyses.xlsx") 
     sci_name = Taxa
   ) %>%
   mutate(pa = 1) %>%
-  dplyr::select(Latitude, Longitude, sci_name, pa, Year) %>%
+  dplyr::select(Latitude, Longitude, sci_name, pa, Year, Mission, Set_Dive, ID) %>%
   st_as_sf(crs = 4326, coords = c("Longitude", "Latitude"), remove = FALSE)
 
 url <-  "https://www.inter.dfo-mpo.gc.ca/en/mar-var-2023-110"          # "https://www.dfo-mpo.gc.ca/oceans/mpa-zpm/gully/index-eng.html"
@@ -165,12 +165,12 @@ gully_vo <- st_sf(
 coral_df <- coral_presence %>%
   st_join(gullyzones) %>%
   st_join(gully_vo) %>%
-  right_join(coral_photos_df, by = "ID") %>%
   mutate(zone_multiplier = case_when(!is.na(Variation_Order) ~ 10,
                                      ZONE_E == "Zone 1" ~ 8,
                                      ZONE_E == "Zone 2" ~ 3,
-                                     .default = 1) %>%
-  dplyr::select(names(coral_presence), zone_multiplier, Variation_Order, ZONE_E, coral_buffer_multiplier, sci_name) %>%
+                                     .default = 1)
+         ) %>%
+  dplyr::select(names(coral_presence), zone_multiplier, Variation_Order, ZONE_E, sci_name) %>%
   mutate(density = runif(n(), 0, 5)*pa*zone_multiplier,    #this is in corals per meter sq     #originally was set to on;y run if the gear was ropos but messes with thing is there is no ROPOS data
          size = runif(n(), 0, 20)*pa*zone_multiplier,     #this is in cm
          per_colony_living = case_when(Year < 2004 & (ZONE_E == "Zone 1" | Variation_Order == "Portion of 4W") ~ rbeta(n(), 17, 3),    # This is the % living of a single colony----Self protected in canyons   (85%)
@@ -185,166 +185,53 @@ coral_df <- coral_presence %>%
   )
 
 
-
-
-#--------------------------------------------
-# Scoring for Indicator 2 (coral diversity)
-#-------------------------------------------
-
-hist_wide_corals <- coral_df %>%
-  filter(Year != max(Year)) %>%
-  mutate(numeric_pa = as.numeric(pa)) %>%
-  st_drop_geometry() %>%
-  pivot_wider(id_cols = ID, names_from = sci_name, values_from = numeric_pa)               #changing from long format to wide format
-
-# Calculate sample-based species accumulation curve
-sp_accum <- specaccum(as.matrix(wide_corals[, -1]), method = "random") # or method = "random"
-
-# Plot the curve
-plot(sp_accum, xlab = "Number of Sites (Sample Effort)", ylab = "Species Richness")
-
-n_samples <- coral_df %>% filter(Year == max(Year)) %>% pull(ID) %>% unique() %>% length()      # get the unique number of samples
-richness_est <- predict(sp_accum, newdata = n_samples)                                      # get the richness estimate based on the number of samples
-sd_est <- approx(x = sp_accum$sites, y = sp_accum$sd, xout = n_samples)$y                   # the standard deviation estimate
-S <- coral_df %>% filter(Year == max(Year), pa) %>% pull(sci_name) %>% unique() %>% length()    # Calculate observed Species richness
-
-lower_95 <- richness_est - (1.96 * sd_est)                          #calculate the lower 95% confidence limit
-score <- as.numeric(S > lower_95) * 100                             #calculate final score
-
-
-
-#---------------------------------------
-#Scoring for Indicator 1 (Distribution)
-#---------------------------------------
-
-coral_df_filtered <- coral_df %>%
-  filter(
-    !(!is.na(Variation_Order) & pa == TRUE &
-        as.numeric(Year) == 2011)
-  )
-
-# Keep unique coral observations
-coral_obs <- coral_df %>%
-  filter(pa == TRUE) %>%
-  distinct(ID, sci_name, .keep_all = TRUE)
-
-
-# Calculate coverage by conservation area
-coverage <- coral_obs %>%
-  sf::st_drop_geometry() %>%
-  summarise(
-    coverage = n_distinct(ID[ZONE_E == "Zone 1"]) /
-      n_distinct(ID)
-
-  )
-
-coverage <- coverage %>%
-  mutate(
-    score = ifelse(coverage > 0.8, 100, coverage/0.8*100)  # if the coverage is above the min it gets 100%, if its below if gets the proportion of
-  )
-
-
-#------------------------------------------
-#Scoring for Indicator 1 (Size structure)
-#------------------------------------------
-
-coral_df <- st_transform(coral_df, 32620)
-mpas <- st_transform(mpas, 32620)
-
-# Combine MPA polygons
-mpa_union <- st_union(mpas)
-
-# Create 1 km grid and clip to MPAs
-grid <- st_make_grid(mpa_union, cellsize = 1000, square = TRUE) %>%
-  st_as_sf() %>%
-  mutate(grid_id = row_number()) %>%
-  st_intersection(mpa_union)
-
-
-# Assign observations to grid cells
-coral_df_grid <- st_join(coral_df, grid, join = st_within)
-
-# Count unique sampling events per grid cell
-grid_counts <- coral_df_grid %>%
-  st_drop_geometry() %>%
-  group_by(grid_id) %>%
-  summarise(
-    n_samples = n_distinct(paste(Mission, Event)),
-    .groups = "drop"
-  )
-
-# Retain cells with more than 3 sampling events
-valid_grid <- grid_counts %>%
-  filter(n_samples >= 2) %>%
-  pull(grid_id)
-
-# Filter observations
-coral_df_filtered <- coral_df_grid %>%
-  filter(grid_id %in% valid_grid,
-         pa) %>%
-  mutate(Year = as.numeric(as.character(Year)))
-
-
-# Spatial + coral_dforal model
-model_spatiocoral_dforal <- lm(
-  size ~ factor(grid_id) + Year,
-  data = coral_df_filtered
-)
-
-
-slope_year <- coef(model_spatiocoral_dforal)["Year"]
-p_value <- summary(model_spatiocoral_dforal)$coefficients["Year", "Pr(>|t|)"]
-
-# Determine significance
-significant_trend <- p_value < 0.05
-
-#Assign score
-size_score <- if (p_value < 0.05 & slope_year < 0) {
-  0
-} else {
-  100
-}
-
-
-
-
-
-
 #-------------------------------------------------
 
 #load shady boots MPAs script and filter
-mpas <- MPAs %>%
-  filter(NAME_E == "Gully Marine Protected Area")
+mpas <- gullyzones %>%
+  st_union()
 
 
 #create spatial grid once
-years <- seq(1997, 2026, 5)
+years <- seq(2004, 2026, 5)
+proj <- "+proj=laea +lon_0=-59.0625 +lat_0=45.0968829 +datum=WGS84 +units=m +no_defs"
 
-coral_df <- st_transform(coral_df, 32620)
-mpas <- st_transform(mpas, 32620)
+coral_df <- st_transform(coral_df, proj)
+mpas <- st_transform(mpas, proj)
+gully_proj <- st_transform(gullyzones, proj)
 
-# Create grid
-mpa_union <- st_union(mpas)
 
-grid <- st_make_grid(mpa_union, cellsize = 1000, square = TRUE) %>%
+grid_gullyzones <- st_make_grid(gully_proj, cellsize = 5000, square = TRUE) %>%
   st_as_sf() %>%
-  mutate(grid_id = row_number()) %>%
-  st_intersection(mpa_union)
+  mutate(grid_id = row_number()) %>%   #intersect of the zones and the whole grid
+  st_intersection(gully_proj)
 
-# Assign observations to grid cells
-coral_grid <- st_join(coral_df, grid, join = st_within)
+grid_vo_intersect <- grid_gullyzones %>%
+  st_intersection(st_transform(gully_vo, proj)) %>%
+  filter(ZONE_E == "Zone 2")
 
-# Identify valid grid cells (at least 3 sampling events)
-valid_grid <- coral_grid %>%
-  st_drop_geometry() %>%
-  filter(!is.na(grid_id)) %>%
-  group_by(grid_id) %>%
-  summarise(
-    n_samples = n_distinct(paste(Mission, Event)),
-    .groups = "drop"
-  ) %>%
-  filter(n_samples >= 2) %>%
-  pull(grid_id)
+grid <- bind_rows(grid_vo_intersect,
+  grid_gullyzones %>%
+    st_difference(st_union(grid_vo_intersect))   #integrate the VOs
+
+) %>%
+  mutate(area = as.numeric(st_area(x)))
+
+
+# # Assign observations to grid cells
+# coral_grid <- st_join(coral_df, grid, join = st_within)
+#
+# # Identify valid grid cells (at least 3 sampling events)
+# valid_grid <- coral_grid %>%
+#   st_drop_geometry() %>%
+#   filter(!is.na(grid_id)) %>%
+#   group_by(grid_id) %>%
+#   summarise(
+#     n_samples = n_distinct(paste(Mission, Set_Dive)),
+#     .groups = "drop"
+#   ) %>%
+#   filter(n_samples >= 2) %>%
+#   pull(grid_id)
 
 
 
@@ -371,15 +258,16 @@ for (yr in years) {
       values_fill = 0
     )
 
+  current_year <- coral_df %>% filter(Year <= yr) %>%
+    filter(Year == max(Year))
+
+  if (nrow(hist_wide) >= 3) {
+
   # Species accumulation curve
   sp_accum <- specaccum(
     as.matrix(hist_wide[, -1]),
     method = "random"
   )
-
-  # Current year sample effort
-  current_year <- coral_df %>% filter(Year <= yr) %>%
-    filter(Year == max(Year))
 
   n_samples <- n_distinct(current_year$ID)
 
@@ -401,46 +289,64 @@ for (yr in years) {
 
   lower_95 <- richness_est - (1.96 * sd_est)
 
-  diversity_score <- as.numeric(S > lower_95) * 100
+  diversity_score <- as.numeric(S > lower_95) * 100 }
+
+  else {
+    diversity_score <- NA
+  }
 
 
   #--------------------------------------------
   # Distribution
   #--------------------------------------------
 
-  coral_obs <- current_year %>%
-    filter(pa == TRUE)
+  coral_grid <- st_join(coral_df %>% filter(Year <= yr) %>%
+                          dplyr::select(-ZONE_E, -Variation_Order),
+                        grid  %>%
+                          dplyr::select(area, grid_id, ZONE_E, Variation_Order), join = st_within) %>%
+    mutate(protected = ZONE_E == "Zone 1" & yr <= 2019 | ((ZONE_E == "Zone 1" | !is.na(Variation_Order)) & yr > 2019))
 
-  coverage <- coral_obs %>%
-    st_drop_geometry() %>%
-    group_by(sci_name) %>%
-    summarise(
-      coverage = n_distinct(ID[ZONE_E == "Zone 1"]) /
-        n_distinct(ID)
-    ) %>%
-    pull(coverage, sci_name)
+zone1_2004_coral <- coral_grid %>%
+  st_drop_geometry() %>%
+  filter(Year <= 2004 & ZONE_E =="Zone 1") %>%
+  group_by(sci_name, grid_id) %>%
+  summarize(area = unique(area)) %>%
+  group_by(sci_name) %>%
+  summarize(area = sum(area)) %>%
+  pull(area) %>%
+  min()
 
-  distribution_scores <- coral_obs %>%
+  distribution_scores <- coral_grid %>%
     st_drop_geometry() %>%
+    group_by(sci_name, grid_id, ZONE_E, Variation_Order, protected) %>%
+    summarize(area = unique(area)) %>%
     group_by(sci_name) %>%
-    summarise(
-      coverage = n_distinct(ID[ZONE_E == "Zone 1"]) /
-        n_distinct(ID),
-      .groups = "drop"
-    ) %>%
-    mutate(
-      Score = ifelse(
-        coverage > 0.8,
-        100,
-        coverage / 0.8 * 100
-      )
-    ) %>%
+    # summarise(
+    #   coverage = 1 - sum(area[!protected]) /
+    #     zone1_2004_coral,
+    #   .groups = "drop"
+    # ) %>%
+    # mutate(
+    #   Score = ifelse(
+    #     coverage > 0.8,
+    #     100,
+    #     coverage / 0.8 * 100
+    #   )
+   # ) %>%
+    summarize(Score = (1 - sum(area[!protected]) /
+              zone1_2004_coral) * 100,
+              not_protected = sum(area[!protected])) %>%
     mutate(
       Year = yr,
       Indicator = "Distribution"
     ) %>%
-    dplyr::select(Year, Indicator, Species = sci_name, Score, coverage)
+    dplyr::select(Year, Indicator, Species = sci_name, Score, not_protected)
 
+  cat(yr, "\n")
+  cat(zone1_2004_coral, "\n")
+
+  print(distribution_scores %>%
+          dplyr::select(Species, not_protected))
 
   # Store diversity score
 
@@ -453,21 +359,6 @@ for (yr in years) {
   )
   # Store species-specific distribution scores
   coral_scores <- bind_rows(coral_scores, distribution_scores)
-
-  # distribution_score <- ifelse(
-  #   coverage > 0.8,
-  #   100,
-  #   coverage / 0.8 * 100
-  # )
-  #
-  # distribution_score
-  #
-  # #retain scores for all years
-  # coral_scores[[length(coral_scores) + 1]] <- data.frame(
-  #   Year = c(yr, yr),
-  #   Indicator = c("Coral diversity", "Distribution"),
-  #   Score = c(diversity_score, distribution_score)
-  # )
 
   #--------------------------------------------
   # Indicators: Living tissue, size, density
@@ -562,10 +453,24 @@ for (yr in years) {
   }
 }
 
+
+
 # Combine all scores into one dataframe
 coral_scores <- bind_rows(coral_scores) %>%
   arrange(Year, Indicator)
+test <- coral_scores %>%
+  filter(Indicator == "Distribution") %>%
+  as_tibble() %>%
+  tidyr::complete(Year,
+           Species,
+           Indicator,
+           fill = list(Score = 100)
+  )
 
 mean_coral_scores <- coral_scores %>%
+  filter(Indicator != "Distribution") %>%
+  bind_rows(test) %>%
   group_by(Year, Indicator) %>%
   summarize(Score = mean(Score, na.rm = TRUE))
+
+ggplot(mean_coral_scores) + geom_line(aes(x = Year, y = Score, col = Indicator))
