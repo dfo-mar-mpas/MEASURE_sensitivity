@@ -7,6 +7,7 @@ require(purrr)
 require(stringr)
 require(tidyr)
 require(vegan)
+require(mgcv)
 require(dplyr)
 
 
@@ -380,8 +381,6 @@ zone1_2004_coral <- coral_grid %>%
       # Filter observations up to target year
       coral_filtered <- coral_grid %>%
         filter(
-          !is.na(grid_id),
-          grid_id %in% valid_grid,
           pa == TRUE,
           as.numeric(Year) <= yr,
           sci_name == sp
@@ -400,20 +399,22 @@ zone1_2004_coral <- coral_grid %>%
       # Check whether there is enough data to fit model
       if (
         nrow(coral_filtered) > 0 &&
-        n_distinct(coral_filtered$Year) > 2
+        n_distinct(coral_filtered$Year) > 3
       ) {
 
-        # Spatial-temporal model
-        model <- lm(
-          as.formula(paste(indicator, "~ factor(grid_id) + Year")),
-          data = coral_filtered
-        )
+        model <- gam(as.formula(paste(indicator, "~ s(Longitude, Latitude) + Year")), data = coral_filtered, method = "REML")
 
-        if ("Year" %in% row.names(summary(model)$coefficients)) {
+        # Spatial-temporal model
+        # model <- lm(
+        #   as.formula(paste(indicator, "~ factor(grid_id) + Year")),
+        #   data = coral_filtered
+        # )
+        #
+        if ("Year" %in%  names(coef(model))) {
 
           slope_year <- coef(model)["Year"]
 
-          p_value <- summary(model)$coefficients[
+          p_value <- summary(model)$p.table[
             "Year", "Pr(>|t|)"
           ]
 
